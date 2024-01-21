@@ -14,6 +14,7 @@ public:
 	void render();
 
 private:
+	void renderFrame();
 	void initialize(HWND windowHandle, BOOL isWindowed);
 
 	// Initialize pipeline state object
@@ -21,6 +22,7 @@ private:
 	void createCommandList();
 	void createVertexBuffer();
 
+	void waitForFrame();
 	void getHardwareAdapter(IDXGIFactory1* factory, IDXGIAdapter1** adapterOut);
 
 	// Individual initialize parts
@@ -35,9 +37,14 @@ private:
 private:
 	wrl::ComPtr<IDXGIFactory1> mFactory;
 	wrl::ComPtr<IDXGISwapChain4> mSwapChain;
+	UINT mFrameIndex;
 
 	wrl::ComPtr<ID3D12Device> mDevice;
 	wrl::ComPtr<ID3D12CommandQueue> mQueue;
+
+	HANDLE mFenceEvent;
+	wrl::ComPtr<ID3D12Fence> mFence;
+	UINT64 mFenceValue;
 
 	wrl::ComPtr<ID3D12DescriptorHeap> mHeapRTV;
 	wrl::ComPtr<ID3D12RootSignature> mRootSignature;

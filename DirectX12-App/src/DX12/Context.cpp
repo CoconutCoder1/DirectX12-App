@@ -34,13 +34,37 @@ Context::Context(HWND windowHandle, BOOL isWindowed)
 
 void Context::render()
 {
-	mCmdAllocator->Reset();
-	mCmdList->Reset(mCmdAllocator.Get(), mPipelineState.Get());
-	
-	UINT frameIndex = mSwapChain->GetCurrentBackBufferIndex();
-	D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = HandleOffset(mHeapRTV->GetCPUDescriptorHandleForHeapStart(), frameIndex, mIncrementSizeRTV);
+	renderFrame();
 
-	mCmdList->OMSetRenderTargets(1, &rtvHandle, TRUE, nullptr);
+	// Execute command lists
+	ID3D12CommandList* commandLists[] = {
+		mCmdList.Get(),
+	};
+
+	mQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
+
+	// Present image to screen
+	mSwapChain->Present(1, 0);
+
+	waitForFrame();
+}
+
+void Context::renderFrame()
+{
+	ThrowIfFailed(mCmdAllocator->Reset());
+	ThrowIfFailed(mCmdList->Reset(mCmdAllocator.Get(), mPipelineState.Get()));
+
+	D3D12_RESOURCE_BARRIER barrier;
+	barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+	barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+
+	// Transition back buffer from present texture to render target
+	barrier.Transition.pResource = mRenderTargets[mFrameIndex].Get();
+	barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+	barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+	barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+	mCmdList->ResourceBarrier(1, &barrier);
 
 	D3D12_VIEWPORT vp = {
 		0.f, 0.f,
@@ -53,28 +77,30 @@ void Context::render()
 		mClientWidth, mClientHeight
 	};
 
+	mCmdList->SetGraphicsRootSignature(mRootSignature.Get());
 	mCmdList->RSSetScissorRects(1, &sRect);
 	mCmdList->RSSetViewports(1, &vp);
 
-	constexpr float kClearColor[4] = { 1.f, 0.f, 0.f, 1.f };
+	// Set render target to the current back buffer
+	D3D12_CPU_DESCRIPTOR_HANDLE rtvHandle = HandleOffset(mHeapRTV->GetCPUDescriptorHandleForHeapStart(), mFrameIndex, mIncrementSizeRTV);
+	mCmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
+
+	// Clear render target
+	constexpr float kClearColor[4] = { 0.541f, 0.596f, 1.f, 1.f };
 	mCmdList->ClearRenderTargetView(rtvHandle, kClearColor, 0, nullptr);
 
-	mCmdList->SetPipelineState(mPipelineState.Get());
-	mCmdList->SetGraphicsRootSignature(mRootSignature.Get());
-
+	// Draw triangle
 	mCmdList->IASetVertexBuffers(0, 1, &mVertexBufferView);
 	mCmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 	mCmdList->DrawInstanced(3, 1, 0, 0);
 
-	mCmdList->Close();
+	// Transition back buffer back to present texture
+	barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+	barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
 
-	ID3D12CommandList* commandLists[] = {
-		mCmdList.Get(),
-	};
+	mCmdList->ResourceBarrier(1, &barrier);
 
-	mQueue->ExecuteCommandLists(_countof(commandLists), commandLists);
-
-	mSwapChain->Present(1, 0);
+	ThrowIfFailed(mCmdList->Close());
 }
 
 void Context::initialize(HWND windowHandle, BOOL isWindowed)
@@ -85,6 +111,12 @@ void Context::initialize(HWND windowHandle, BOOL isWindowed)
 	createSwapChain(windowHandle, isWindowed);
 	createDescriptorHeap();
 	createRenderTargets();
+
+	mFenceValue = 1;
+	ThrowIfFailed(mDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&mFence)));
+	mFenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+
+	waitForFrame();
 
 	initializePSO();
 	createCommandList();
@@ -156,6 +188,9 @@ void Context::initializePSO()
 	psDesc.RasterizerState = rasterDesc;
 	psDesc.BlendState = blendDesc;
 	psDesc.SampleDesc.Count = 1;
+	psDesc.DepthStencilState.DepthEnable = FALSE;
+	psDesc.DepthStencilState.StencilEnable = FALSE;
+	psDesc.SampleMask = UINT_MAX;
 	
 	psDesc.VS = { vertexShader->GetBufferPointer(), vertexShader->GetBufferSize() };
 	psDesc.PS = { pixelShader->GetBufferPointer(), pixelShader->GetBufferSize() };
@@ -184,9 +219,9 @@ void Context::createCommandList()
 void Context::createVertexBuffer()
 {
 	Vertex vertices[] = {
-		{ DirectX::XMFLOAT3(-0.5f, -0.5f, 0.f) },
+		{ DirectX::XMFLOAT3(0.5f, -0.5f, 0.f) },
 		{ DirectX::XMFLOAT3(0.f, 0.5f, 0.f) },
-		{ DirectX::XMFLOAT3(0.5f, -0.5f, 0.f) }
+		{ DirectX::XMFLOAT3(-0.5f, -0.5f, 0.f) }
 	};
 
 	constexpr UINT verticesSize = sizeof(vertices);
@@ -316,6 +351,22 @@ void Context::createRenderTargets()
 
 		mDevice->CreateRenderTargetView(mRenderTargets[i].Get(), nullptr, HandleOffset(cpuHandle, i, mIncrementSizeRTV));
 	}
+}
+
+void Context::waitForFrame()
+{
+	const UINT64 fence = mFenceValue;
+
+	ThrowIfFailed(mQueue->Signal(mFence.Get(), fence));
+	mFenceValue++;
+
+	if (mFence->GetCompletedValue() < fence)
+	{
+		ThrowIfFailed(mFence->SetEventOnCompletion(fence, mFenceEvent));
+		WaitForSingleObject(mFenceEvent, INFINITE);
+	}
+
+	mFrameIndex = mSwapChain->GetCurrentBackBufferIndex();
 }
 
 void Context::getHardwareAdapter(IDXGIFactory1* factory, IDXGIAdapter1** adapterOut)
