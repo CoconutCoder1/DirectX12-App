@@ -1,7 +1,10 @@
 #include "pch.h"
+#include "Application.h"
 
 int main()
 {
-	printf("Hello, World!\n");
+	Application app;
+
+	app.start();
 	return 0;
 }
